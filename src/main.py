@@ -82,10 +82,84 @@ def swipe():
     Returns:
         Response: JSON response with swipe result and match status.
     """
-    data = request.get_json()
-    user_id = data.get("user_id") if data else None
-    target_id = data.get("target_id") if data else None
-    action = data.get("action") if data else None  # 'like' or 'pass'
+    if not request.is_json:
+        return (
+            jsonify(
+                {
+                    "error": "Invalid request",
+                    "details": "Content type must be application/json.",
+                }
+            ),
+            400,
+        )
+
+    data = request.get_json(silent=True)
+    if data is None:
+        return (
+            jsonify(
+                {
+                    "error": "Invalid request",
+                    "details": "Malformed JSON payload.",
+                }
+            ),
+            400,
+        )
+
+    required_fields = {
+        "user_id": int,
+        "target_id": int,
+        "action": str,
+    }
+
+    for field, expected_type in required_fields.items():
+        if field not in data:
+            return (
+                jsonify(
+                    {
+                        "error": "Invalid request",
+                        "details": f"Missing field '{field}'.",
+                    }
+                ),
+                400,
+            )
+
+        value = data[field]
+        if expected_type is int:
+            if not isinstance(value, int) or isinstance(value, bool):
+                return (
+                    jsonify(
+                        {
+                            "error": "Invalid request",
+                            "details": f"Field '{field}' must be an integer.",
+                        }
+                    ),
+                    400,
+                )
+        elif not isinstance(value, expected_type):
+            return (
+                jsonify(
+                    {
+                        "error": "Invalid request",
+                        "details": f"Field '{field}' must be of type {expected_type.__name__}.",
+                    }
+                ),
+                400,
+            )
+
+    action = data["action"].lower()
+    if action not in {"like", "pass"}:
+        return (
+            jsonify(
+                {
+                    "error": "Invalid request",
+                    "details": "Field 'action' must be either 'like' or 'pass'.",
+                }
+            ),
+            400,
+        )
+
+    user_id = data["user_id"]
+    target_id = data["target_id"]
 
     # Basic match detection logic (to be enhanced with real data)
     is_match = action == "like" and target_id == 101  # Simulation
