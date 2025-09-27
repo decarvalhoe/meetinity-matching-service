@@ -9,6 +9,41 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 
+MATCHES_BY_USER = {
+    1: [
+        {
+            "id": 1,
+            "user_id": 101,
+            "name": "Sophie Martin",
+            "title": "Product Manager",
+            "company": "TechCorp",
+            "match_score": 85,
+            "common_interests": ["startup", "product", "innovation"],
+        },
+        {
+            "id": 2,
+            "user_id": 102,
+            "name": "Thomas Dubois",
+            "title": "CTO",
+            "company": "InnovateLab",
+            "match_score": 78,
+            "common_interests": ["tech", "leadership", "ai"],
+        },
+    ],
+    2: [
+        {
+            "id": 3,
+            "user_id": 103,
+            "name": "Camille Lefevre",
+            "title": "Data Scientist",
+            "company": "DataWiz",
+            "match_score": 88,
+            "common_interests": ["data", "ai", "cloud"],
+        }
+    ],
+}
+
+
 @app.route("/health")
 def health():
     """Health check endpoint.
@@ -29,26 +64,7 @@ def get_matches(user_id):
     Returns:
         Response: JSON response with user matches and compatibility scores.
     """
-    matches = [
-        {
-            "id": 1,
-            "user_id": 101,
-            "name": "Sophie Martin",
-            "title": "Product Manager",
-            "company": "TechCorp",
-            "match_score": 85,
-            "common_interests": ["startup", "product", "innovation"],
-        },
-        {
-            "id": 2,
-            "user_id": 102,
-            "name": "Thomas Dubois",
-            "title": "CTO",
-            "company": "InnovateLab",
-            "match_score": 78,
-            "common_interests": ["tech", "leadership", "ai"],
-        },
-    ]
+    matches = MATCHES_BY_USER.get(user_id, [])
     return jsonify({"matches": matches, "user_id": user_id})
 
 
