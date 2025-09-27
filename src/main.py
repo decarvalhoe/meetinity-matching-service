@@ -1,3 +1,9 @@
+"""Meetinity Matching Service.
+
+This service handles user matching algorithms, profile suggestions,
+and swipe-based interactions for the Meetinity platform.
+"""
+
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -5,12 +11,24 @@ app = Flask(__name__)
 
 @app.route("/health")
 def health():
+    """Health check endpoint.
+    
+    Returns:
+        Response: JSON response with service status.
+    """
     return jsonify({"status": "ok", "service": "matching-service"})
 
 
 @app.route("/matches/<int:user_id>")
 def get_matches(user_id):
-    """Récupérer les matches pour un utilisateur"""
+    """Retrieve matches for a specific user.
+    
+    Args:
+        user_id (int): The ID of the user to get matches for.
+        
+    Returns:
+        Response: JSON response with user matches and compatibility scores.
+    """
     matches = [
         {
             "id": 1,
@@ -36,13 +54,24 @@ def get_matches(user_id):
 
 @app.route("/swipe", methods=["POST"])
 def swipe():
-    """Enregistrer un swipe (like/pass)"""
+    """Record a swipe action (like/pass) and detect matches.
+    
+    Expected JSON payload:
+        {
+            "user_id": int,
+            "target_id": int,
+            "action": str  # 'like' or 'pass'
+        }
+        
+    Returns:
+        Response: JSON response with swipe result and match status.
+    """
     data = request.get_json()
     user_id = data.get("user_id") if data else None
     target_id = data.get("target_id") if data else None
     action = data.get("action") if data else None  # 'like' or 'pass'
 
-    # Logique de matching
+    # Basic match detection logic (to be enhanced with real data)
     is_match = action == "like" and target_id == 101  # Simulation
 
     return jsonify(
@@ -57,7 +86,14 @@ def swipe():
 
 @app.route("/algorithm/suggest/<int:user_id>")
 def suggest_profiles(user_id):
-    """Suggérer des profils basés sur l'algorithme de matching"""
+    """Generate personalized profile suggestions using matching algorithm.
+    
+    Args:
+        user_id (int): The ID of the user to generate suggestions for.
+        
+    Returns:
+        Response: JSON response with suggested profiles and compatibility reasons.
+    """
     suggestions = [
         {
             "user_id": 201,
