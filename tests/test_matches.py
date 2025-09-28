@@ -3,7 +3,7 @@
 import pytest
 
 from src.main import app
-from src.storage import create_matches, create_user
+from src.storage import create_user
 from src.storage.models import User
 
 
@@ -14,49 +14,111 @@ def client():
         yield test_client
 
 
-def test_matches_endpoint_returns_persisted_data(client):
-    """Ensure matches are read from the ORM-backed storage."""
+def _build_user(**kwargs) -> User:
+    base = {
+        "id": None,
+        "title": None,
+        "company": None,
+        "bio": None,
+        "preferences": [],
+    }
+    base.update(kwargs)
+    return User(**base)
 
-    user = create_user(
-        User(
-            id=None,
+
+def test_matches_endpoint_returns_sorted_paginated_scores(client):
+    """Ensure matches are scored and paginated through the scoring engine."""
+
+    alice = create_user(
+        _build_user(
             email="alice@example.com",
             full_name="Alice",
-            preferences=["ai", "cloud"],
+            title="Product Manager",
+            preferences=[
+                {"type": "industry", "value": "tech"},
+                {"type": "skills", "value": ["product strategy", "python", "leadership"]},
+                {"type": "location", "value": "Paris,FR"},
+                {"type": "connections", "value": ["mentor-1", "mentor-2"]},
+                {"type": "objectives", "value": ["networking", "mentoring"]},
+            ],
         )
     )
-    partner = create_user(
-        User(
-            id=None,
+
+    bob = create_user(
+        _build_user(
             email="bob@example.com",
             full_name="Bob",
-            title="CTO",
-            company="InnovateLab",
-            preferences=["ai", "robotics"],
+            title="Product Manager",
+            preferences=[
+                "industry:tech",
+                "skill:python",
+                "skill:product strategy",
+                "skill:growth",  # ensure some overlap but not perfect
+                "location:Paris,FR",
+                {"type": "connections", "value": ["mentor-1", "investor-1"]},
+                {"type": "objectives", "value": ["networking", "fundraising"]},
+            ],
         )
     )
-    stranger = create_user(
-        User(
-            id=None,
+
+    carol = create_user(
+        _build_user(
             email="carol@example.com",
             full_name="Carol",
-            preferences=["design"],
+            title="Growth Lead",
+            preferences=[
+                "industry:tech",
+                "skill:python",
+                "skill:analytics",
+                "location:Lyon,FR",
+                {"type": "connections", "value": ["mentor-3"]},
+                {"type": "objectives", "value": ["networking"]},
+            ],
         )
     )
 
-    create_matches(user.id, partner.id, score=88.5, common_interests=["ai"])
+    dave = create_user(
+        _build_user(
+            email="dave@example.com",
+            full_name="Dave",
+            title="Operations Specialist",
+            preferences=[
+                "industry:finance",
+                "skill:excel",
+                "location:Berlin,DE",
+                {"type": "objectives", "value": ["hiring"]},
+            ],
+        )
+    )
 
-    response = client.get(f"/matches/{user.id}")
-    other_response = client.get(f"/matches/{stranger.id}")
-
+    response = client.get(f"/matches/{alice.id}?page=1&page_size=2")
     assert response.status_code == 200
-    assert other_response.status_code == 200
+    payload = response.get_json()
 
-    matches = response.get_json()["matches"]
-    assert len(matches) == 1
-    first_match = matches[0]
-    assert first_match["user_id"] == partner.id
-    assert first_match["match_score"] == 88.5
-    assert first_match["common_interests"] == ["ai"]
+    assert payload["user_id"] == alice.id
+    assert payload["pagination"] == {"page": 1, "page_size": 2, "total": 3, "pages": 2}
+    assert payload["weights"]["skills"] == pytest.approx(0.3)
 
-    assert other_response.get_json()["matches"] == []
+    results = payload["results"]
+    assert len(results) == 2
+    assert [result["user_id"] for result in results] == [bob.id, carol.id]
+    assert results[0]["score"] >= results[1]["score"]
+    assert set(results[0]["breakdown"].keys()) == {
+        "industry",
+        "role",
+        "skills",
+        "location",
+        "connections",
+        "objectives",
+    }
+
+    second_page = client.get(f"/matches/{alice.id}?page=2&page_size=2")
+    assert second_page.status_code == 200
+    payload_page_two = second_page.get_json()
+    assert [result["user_id"] for result in payload_page_two["results"]] == [dave.id]
+
+
+def test_matches_endpoint_returns_404_for_unknown_user(client):
+    response = client.get("/matches/9999")
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "Not found"

@@ -314,6 +314,44 @@ def log_swipe_event(event: SwipeEvent) -> SwipeEvent:
     return event
 
 
+
+
+def list_users(exclude_user_id: int | None = None, only_active: bool = True) -> List[User]:
+    """Return users stored in the database."""
+
+    conn = _connect()
+    clauses = []
+    params: List[object] = []
+    if only_active:
+        clauses.append("is_active = 1")
+    if exclude_user_id is not None:
+        clauses.append("id != ?")
+        params.append(exclude_user_id)
+    where_clause = ""
+    if clauses:
+        where_clause = " WHERE " + " AND ".join(clauses)
+    rows = conn.execute(
+        "SELECT * FROM users" + where_clause + " ORDER BY id", tuple(params)
+    ).fetchall()
+    users: List[User] = []
+    for row in rows:
+        users.append(
+            User(
+                id=row["id"],
+                email=row["email"],
+                full_name=row["full_name"],
+                title=row["title"],
+                company=row["company"],
+                bio=row["bio"],
+                preferences=json.loads(row["preferences"] or "[]"),
+                is_active=bool(row["is_active"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+        )
+    return users
+
+
 def fetch_matches_for_user(user_id: int) -> List[Dict[str, object]]:
     conn = _connect()
     rows = conn.execute(
