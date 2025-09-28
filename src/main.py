@@ -7,43 +7,40 @@ and swipe-based interactions for the Meetinity platform.
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from src.storage import (
+    create_matches,
+    create_swipe,
+    fetch_matches_for_user,
+    get_user,
+    has_mutual_like,
+    init_db,
+    log_swipe_event,
+)
+from src.storage.models import Swipe, SwipeEvent, User
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+init_db()
 
 
-MATCHES_BY_USER = {
-    1: [
-        {
-            "id": 1,
-            "user_id": 101,
-            "name": "Sophie Martin",
-            "title": "Product Manager",
-            "company": "TechCorp",
-            "match_score": 85,
-            "common_interests": ["startup", "product", "innovation"],
-        },
-        {
-            "id": 2,
-            "user_id": 102,
-            "name": "Thomas Dubois",
-            "title": "CTO",
-            "company": "InnovateLab",
-            "match_score": 78,
-            "common_interests": ["tech", "leadership", "ai"],
-        },
-    ],
-    2: [
-        {
-            "id": 3,
-            "user_id": 103,
-            "name": "Camille Lefevre",
-            "title": "Data Scientist",
-            "company": "DataWiz",
-            "match_score": 88,
-            "common_interests": ["data", "ai", "cloud"],
-        }
-    ],
-}
+def _preferences_set(user: User) -> set[str]:
+    preferences = user.preferences or []
+    return {pref.lower() for pref in preferences}
+
+
+def _calculate_match_score(user: User, target: User) -> float:
+    """Basic score using overlap of stored preferences."""
+
+    prefs_user = _preferences_set(user)
+    prefs_target = _preferences_set(target)
+    if not prefs_user and not prefs_target:
+        return 50.0
+
+    intersection = prefs_user & prefs_target
+    union = prefs_user | prefs_target
+    if not union:
+        return 50.0
+    return round((len(intersection) / len(union)) * 100, 2)
 
 
 @app.route("/health")
@@ -66,8 +63,23 @@ def get_matches(user_id):
     Returns:
         Response: JSON response with user matches and compatibility scores.
     """
-    matches = MATCHES_BY_USER.get(user_id, [])
-    return jsonify({"matches": matches, "user_id": user_id})
+    matches = fetch_matches_for_user(user_id)
+    sanitized = []
+    for match in matches:
+        sanitized.append(
+            {
+                "id": match["id"],
+                "user_id": match["user_id"],
+                "name": match["name"],
+                "title": match["title"],
+                "company": match["company"],
+                "match_score": match["match_score"],
+                "common_interests": match["common_interests"],
+                "created_at": match["created_at"],
+            }
+        )
+
+    return jsonify({"matches": sanitized, "user_id": user_id})
 
 
 @app.route("/swipe", methods=["POST"])
@@ -163,17 +175,63 @@ def swipe():
     user_id = data["user_id"]
     target_id = data["target_id"]
 
-    # Basic match detection logic (to be enhanced with real data)
-    is_match = action == "like" and target_id == 101  # Simulation
+    user = get_user(user_id)
+    target = get_user(target_id)
+    if user is None or target is None:
+        return (
+            jsonify(
+                {
+                    "error": "Not found",
+                    "details": "User or target not found in storage.",
+                }
+            ),
+            404,
+        )
 
-    return jsonify(
-        {
-            "user_id": user_id,
-            "target_id": target_id,
-            "action": action,
-            "is_match": is_match,
-        }
+    swipe = create_swipe(Swipe(id=None, user_id=user_id, target_id=target_id, action=action))
+
+    is_match = False
+    score_value = None
+    common_interests: list[str] = []
+
+    if action == "like" and has_mutual_like(user_id, target_id):
+        is_match = True
+        score_value = _calculate_match_score(user, target)
+        common_interests = sorted(_preferences_set(user) & _preferences_set(target))
+        create_matches(user_id, target_id, score_value, common_interests)
+
+    event_payload = {
+        "user_preferences": user.preferences,
+        "target_preferences": target.preferences,
+    }
+    if is_match:
+        event_payload["is_match"] = True
+        event_payload["common_interests"] = common_interests
+
+    log_swipe_event(
+        SwipeEvent(
+            id=None,
+            swipe_id=swipe.id,
+            event_type="swipe",
+            user_id=user_id,
+            target_id=target_id,
+            action=action,
+            score=score_value,
+            payload=event_payload,
+        )
     )
+
+    response_body = {
+        "user_id": user_id,
+        "target_id": target_id,
+        "action": action,
+        "is_match": is_match,
+    }
+    if score_value is not None:
+        response_body["match_score"] = score_value
+        response_body["common_interests"] = common_interests
+
+    return jsonify(response_body)
 
 
 @app.route("/algorithm/suggest/<int:user_id>")
