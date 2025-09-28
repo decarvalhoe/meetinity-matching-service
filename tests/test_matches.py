@@ -3,6 +3,8 @@
 import pytest
 
 from src.main import app
+from src.storage import create_matches, create_user
+from src.storage.models import User
 
 
 @pytest.fixture()
@@ -12,20 +14,49 @@ def client():
         yield test_client
 
 
-def test_matches_are_user_specific(client):
-    """Ensure each user receives the appropriate match list."""
+def test_matches_endpoint_returns_persisted_data(client):
+    """Ensure matches are read from the ORM-backed storage."""
 
-    response_user_one = client.get("/matches/1")
-    response_user_two = client.get("/matches/2")
-    response_unknown_user = client.get("/matches/999")
+    user = create_user(
+        User(
+            id=None,
+            email="alice@example.com",
+            full_name="Alice",
+            preferences=["ai", "cloud"],
+        )
+    )
+    partner = create_user(
+        User(
+            id=None,
+            email="bob@example.com",
+            full_name="Bob",
+            title="CTO",
+            company="InnovateLab",
+            preferences=["ai", "robotics"],
+        )
+    )
+    stranger = create_user(
+        User(
+            id=None,
+            email="carol@example.com",
+            full_name="Carol",
+            preferences=["design"],
+        )
+    )
 
-    assert response_user_one.status_code == 200
-    assert response_user_two.status_code == 200
-    assert response_unknown_user.status_code == 200
+    create_matches(user.id, partner.id, score=88.5, common_interests=["ai"])
 
-    matches_user_one = response_user_one.get_json()["matches"]
-    matches_user_two = response_user_two.get_json()["matches"]
-    matches_unknown_user = response_unknown_user.get_json()["matches"]
+    response = client.get(f"/matches/{user.id}")
+    other_response = client.get(f"/matches/{stranger.id}")
 
-    assert matches_user_one != matches_user_two
-    assert matches_unknown_user == []
+    assert response.status_code == 200
+    assert other_response.status_code == 200
+
+    matches = response.get_json()["matches"]
+    assert len(matches) == 1
+    first_match = matches[0]
+    assert first_match["user_id"] == partner.id
+    assert first_match["match_score"] == 88.5
+    assert first_match["common_interests"] == ["ai"]
+
+    assert other_response.get_json()["matches"] == []
