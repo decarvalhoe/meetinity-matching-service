@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Tuple
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from src.algorithms import DEFAULT_WEIGHTS, compute_match_score
+from src.algorithms import (
+    DEFAULT_WEIGHTS,
+    compute_match_score,
+    predict_preference_score,
+)
 from src.storage import (
     create_matches,
     create_swipe,
@@ -38,6 +42,8 @@ CRITERION_LABELS = {
     "connections": "Connexions",
     "objectives": "Objectifs",
 }
+
+PREFERENCE_WEIGHT = 0.4
 
 
 def _preferences_set(user: User) -> set[str]:
@@ -246,6 +252,12 @@ def _format_weighted_reasons(scoring: Mapping[str, Any]) -> List[Dict[str, Any]]
     return reasons
 
 
+def _combined_score(match_score: float, preference_score: float) -> float:
+    match_component = (1.0 - PREFERENCE_WEIGHT) * match_score
+    preference_component = PREFERENCE_WEIGHT * (preference_score * 100.0)
+    return round(match_component + preference_component, 2)
+
+
 def _score_candidates_for_user(
     user: User, context: Mapping[str, Any] | None
 ) -> Tuple[List[Tuple[User, Dict[str, Any]]], Dict[str, float]]:
@@ -257,6 +269,9 @@ def _score_candidates_for_user(
         candidate_profile = _build_scoring_profile(candidate)
         scoring = compute_match_score(base_profile, candidate_profile, context)
         weights_used = scoring["weights"]
+        preference_score = predict_preference_score(user, candidate, scoring)
+        scoring["preference_score"] = preference_score
+        scoring["combined_score"] = _combined_score(scoring["total"], preference_score)
         scored.append((candidate, scoring))
 
     if weights_used is None:
@@ -297,7 +312,10 @@ def get_matches(user_id):
 
     context = {"weights": weight_overrides} if weight_overrides else None
     scored_candidates, weights_used = _score_candidates_for_user(user, context)
-    scored_candidates.sort(key=lambda item: item[1]["total"], reverse=True)
+    scored_candidates.sort(
+        key=lambda item: item[1].get("combined_score", item[1]["total"]),
+        reverse=True,
+    )
 
     total = len(scored_candidates)
     start = (page - 1) * page_size
@@ -310,7 +328,12 @@ def get_matches(user_id):
             "name": candidate.full_name,
             "title": candidate.title,
             "company": candidate.company,
-            "score": item_score["total"],
+            "score": item_score.get("combined_score", item_score["total"]),
+            "match_score": item_score["total"],
+            "preference_score": round(
+                float(item_score.get("preference_score", 0.5)),
+                4,
+            ),
             "breakdown": _format_breakdown(item_score),
         }
         for candidate, item_score in paginated
@@ -491,7 +514,10 @@ def suggest_profiles(user_id):
 
     context = {"weights": weight_overrides} if weight_overrides else None
     scored_candidates, weights_used = _score_candidates_for_user(user, context)
-    scored_candidates.sort(key=lambda item: item[1]["total"], reverse=True)
+    scored_candidates.sort(
+        key=lambda item: item[1].get("combined_score", item[1]["total"]),
+        reverse=True,
+    )
 
     suggestions = []
     for candidate, item_score in scored_candidates[:limit]:
@@ -501,7 +527,12 @@ def suggest_profiles(user_id):
                 "name": candidate.full_name,
                 "title": candidate.title,
                 "company": candidate.company,
-                "score": item_score["total"],
+                "score": item_score.get("combined_score", item_score["total"]),
+                "match_score": item_score["total"],
+                "preference_score": round(
+                    float(item_score.get("preference_score", 0.5)),
+                    4,
+                ),
                 "breakdown": _format_breakdown(item_score),
                 "reasons": _format_weighted_reasons(item_score),
             }

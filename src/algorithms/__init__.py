@@ -1,5 +1,6 @@
 """Algorithmic helpers for the matching service."""
 
+from .ml import predict_preference_score
 from .scoring import (
     DEFAULT_WEIGHTS,
     compute_match_score,
@@ -14,6 +15,7 @@ from .scoring import (
 __all__ = [
     "DEFAULT_WEIGHTS",
     "compute_match_score",
+    "predict_preference_score",
     "score_connections",
     "score_goals",
     "score_industry",
