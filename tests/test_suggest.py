@@ -89,6 +89,8 @@ def test_suggest_endpoint_returns_weighted_reasons(client):
     assert len(suggestions) == 1
     suggestion = suggestions[0]
     assert suggestion["user_id"] == best_match.id
+    assert suggestion["match_score"] == pytest.approx(suggestion["match_score"])
+    assert 0.0 <= suggestion["preference_score"] <= 1.0
 
     reasons = suggestion["reasons"]
     assert reasons, "Expected weighted reasons to be present"

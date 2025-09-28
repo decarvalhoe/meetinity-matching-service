@@ -19,6 +19,7 @@ class Settings:
     pool_pre_ping: bool
     max_retries: int
     retry_backoff: float
+    preference_models_dir: str
 
     @property
     def engine_options(self) -> dict[str, object]:
@@ -56,6 +57,7 @@ def get_settings() -> Settings:
         pool_pre_ping=_to_bool(os.getenv("DATABASE_POOL_PRE_PING"), default=True),
         max_retries=int(os.getenv("DATABASE_MAX_RETRIES", "3")),
         retry_backoff=float(os.getenv("DATABASE_RETRY_BACKOFF", "0.5")),
+        preference_models_dir=os.getenv("PREFERENCE_MODELS_DIR", "models"),
     )
 
 

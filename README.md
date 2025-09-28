@@ -54,6 +54,32 @@ The service currently provides mock data and basic functionality:
 
 The service will start on port 5004 by default.
 
+## Preference Model Training
+
+Swipe events and confirmed matches are recorded in the embedded SQLite database.
+You can export them and train the machine learning model that powers the
+`predict_preference_score` inference helper by running:
+
+```bash
+python scripts/train_preferences.py --refresh-settings
+```
+
+This command collects the most recent swipe events, performs a train/test split,
+and stores the resulting model (together with metadata and metrics) inside the
+`models/` directory. The latest model is automatically referenced through a
+`models/latest.json` file so that the API can use it for inference.
+
+To keep the predictions up to date, schedule the script to run periodically.
+For instance, on a Unix-like system you can add the following cron entry to
+retrain the model every night at 02:00:
+
+```
+0 2 * * * /usr/bin/python /path/to/repo/scripts/train_preferences.py >> /var/log/meetinity/train.log 2>&1
+```
+
+After each training run the service immediately picks up the new model without
+requiring a restart.
+
 ## Development Roadmap
 
 ### Phase 1 (Current)

@@ -54,6 +54,31 @@ Le service fournit actuellement des données fictives et des fonctionnalités de
 
 Le service démarrera sur le port 5004 par défaut.
 
+## Entraînement du Modèle de Préférences
+
+Les swipes et les matches confirmés sont enregistrés dans la base SQLite. Pour
+entraîner le modèle de préférence utilisé par la fonction
+`predict_preference_score`, exécutez :
+
+```bash
+python scripts/train_preferences.py --refresh-settings
+```
+
+La commande collecte les derniers événements, réalise une séparation
+train/test, puis stocke le modèle et ses métadonnées dans le dossier `models/`.
+Le fichier `models/latest.json` référence automatiquement la version active et
+permet à l'API de charger le bon artefact.
+
+Planifiez l'entraînement régulièrement (par exemple toutes les nuits à 02h00)
+via une tâche cron afin de garder les prédictions à jour :
+
+```
+0 2 * * * /usr/bin/python /chemin/vers/repo/scripts/train_preferences.py >> /var/log/meetinity/train.log 2>&1
+```
+
+Après chaque exécution, le service utilise immédiatement le nouveau modèle sans
+redémarrage.
+
 ## Feuille de Route de Développement
 
 ### Phase 1 (Actuelle)
