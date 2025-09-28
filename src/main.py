@@ -4,16 +4,24 @@ This service handles user matching algorithms, profile suggestions,
 and swipe-based interactions for the Meetinity platform.
 """
 
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Iterable, Mapping
+from typing import Any, Dict, List, Tuple
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from src.algorithms import DEFAULT_WEIGHTS, compute_match_score
 from src.storage import (
     create_matches,
     create_swipe,
-    fetch_matches_for_user,
     get_user,
     has_mutual_like,
     init_db,
+    list_users,
     log_swipe_event,
 )
 from src.storage.models import Swipe, SwipeEvent, User
@@ -22,10 +30,19 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 init_db()
 
+CRITERION_LABELS = {
+    "industry": "Industrie",
+    "role": "Rôle",
+    "skills": "Compétences",
+    "location": "Localisation",
+    "connections": "Connexions",
+    "objectives": "Objectifs",
+}
+
 
 def _preferences_set(user: User) -> set[str]:
     preferences = user.preferences or []
-    return {pref.lower() for pref in preferences}
+    return {pref.lower() for pref in preferences if isinstance(pref, str)}
 
 
 def _calculate_match_score(user: User, target: User) -> float:
@@ -43,10 +60,215 @@ def _calculate_match_score(user: User, target: User) -> float:
     return round((len(intersection) / len(union)) * 100, 2)
 
 
+def _iterable_from_value(value: Any) -> Iterable[str]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        nested = (
+            value.get("items")
+            or value.get("value")
+            or value.get("values")
+            or value.get("list")
+        )
+        if nested is not None and nested is not value:
+            return _iterable_from_value(nested)
+        return []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return (str(item).strip() for item in value if str(item).strip())
+    text = str(value).strip()
+    if not text:
+        return []
+    return [text]
+
+
+def _update_location(location: Dict[str, str], value: Any) -> None:
+    def _assign(key: str, raw: Any) -> None:
+        if raw is None:
+            return
+        text = str(raw).strip()
+        if text:
+            location[key] = text
+
+    if value is None:
+        return
+    if isinstance(value, Mapping):
+        for key in ("city", "country", "region", "continent"):
+            if key in value:
+                _assign(key, value[key])
+        return
+
+    text = str(value).strip()
+    if not text:
+        return
+    tokens = [part.strip() for part in re.split(r"[,/|]", text) if part.strip()]
+    if len(tokens) == 1:
+        token = tokens[0]
+        if len(token) <= 2 and token.isalpha():
+            _assign("country", token)
+        else:
+            _assign("city", token)
+        return
+    if tokens:
+        _assign("city", tokens[0])
+    if len(tokens) >= 2:
+        _assign("country", tokens[1])
+    if len(tokens) >= 3:
+        _assign("region", tokens[2])
+
+
+def _build_scoring_profile(user: User) -> Dict[str, Any]:
+    industry: str | None = None
+    role = user.title
+    skills: set[str] = set()
+    objectives: set[str] = set()
+    connections: set[str] = set()
+    location: Dict[str, str] = {}
+
+    for entry in user.preferences or []:
+        key: str | None
+        value: Any
+        if isinstance(entry, Mapping):
+            key = str(
+                entry.get("type")
+                or entry.get("key")
+                or entry.get("name")
+                or entry.get("category")
+                or ""
+            ).strip().lower()
+            value = entry.get("value")
+            if not key:
+                continue
+        else:
+            text = str(entry).strip()
+            if not text:
+                continue
+            raw_key, sep, remainder = text.partition(":")
+            if sep:
+                key = raw_key.strip().lower()
+                value = remainder.strip()
+            else:
+                key = "skill"
+                value = text
+
+        if key == "industry":
+            collected = list(_iterable_from_value(value))
+            if collected:
+                industry = collected[0]
+        elif key == "role":
+            collected = list(_iterable_from_value(value))
+            if collected:
+                role = collected[0]
+        elif key in {"skill", "skills"}:
+            skills.update(token for token in _iterable_from_value(value))
+        elif key in {"objective", "objectives", "goal", "goals"}:
+            objectives.update(token for token in _iterable_from_value(value))
+        elif key in {"connection", "connections"}:
+            connections.update(token for token in _iterable_from_value(value))
+        elif key == "location":
+            _update_location(location, value)
+        elif key in {"city", "country", "region", "continent"}:
+            _update_location(location, {key: value})
+        else:
+            # Backwards compatibility: treat unknown strings as skills
+            skills.update(token for token in _iterable_from_value(value if value else entry))
+
+    profile = {
+        "id": user.id,
+        "name": user.full_name,
+        "industry": industry,
+        "role": role,
+        "skills": sorted(skills),
+        "location": location,
+        "connections": sorted(connections),
+        "objectives": sorted(objectives),
+    }
+    return profile
+
+
+def _parse_positive_int(raw: str | None, name: str, default: int) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Le paramètre '{name}' doit être un entier positif.") from exc
+    if value <= 0:
+        raise ValueError(f"Le paramètre '{name}' doit être strictement positif.")
+    return value
+
+
+def _parse_weight_overrides(args: Mapping[str, str]) -> Dict[str, float]:
+    overrides: Dict[str, float] = {}
+    for criterion in DEFAULT_WEIGHTS.keys():
+        param = f"weight_{criterion}"
+        if param not in args:
+            continue
+        raw_value = args[param]
+        try:
+            overrides[criterion] = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Le poids '{param}' doit être un nombre valide."
+            ) from exc
+    return overrides
+
+
+def _round_weights(weights: Mapping[str, float]) -> Dict[str, float]:
+    return {key: round(value, 4) for key, value in weights.items()}
+
+
+def _format_breakdown(scoring: Mapping[str, Any]) -> Dict[str, float]:
+    details = scoring.get("details", {}) if isinstance(scoring, Mapping) else {}
+    return {key: round(float(value), 2) for key, value in details.items()}
+
+
+def _format_weighted_reasons(scoring: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    details = scoring.get("details", {}) if isinstance(scoring, Mapping) else {}
+    weights = scoring.get("weights", {}) if isinstance(scoring, Mapping) else {}
+    reasons: List[Dict[str, Any]] = []
+    for criterion, score_value in details.items():
+        weight = float(weights.get(criterion, 0.0))
+        contribution = round(float(score_value) * weight, 2)
+        if contribution <= 0:
+            continue
+        label = CRITERION_LABELS.get(criterion, criterion.title())
+        reasons.append(
+            {
+                "criterion": criterion,
+                "label": label,
+                "score": round(float(score_value), 2),
+                "weight": round(weight, 4),
+                "contribution": contribution,
+                "description": f"{label}: {float(score_value):.1f} (poids {weight:.2f}, contribution {contribution:.1f})",
+            }
+        )
+    reasons.sort(key=lambda item: item["contribution"], reverse=True)
+    return reasons
+
+
+def _score_candidates_for_user(
+    user: User, context: Mapping[str, Any] | None
+) -> Tuple[List[Tuple[User, Dict[str, Any]]], Dict[str, float]]:
+    base_profile = _build_scoring_profile(user)
+    scored: List[Tuple[User, Dict[str, Any]]] = []
+    weights_used: Dict[str, float] | None = None
+
+    for candidate in list_users(exclude_user_id=user.id):
+        candidate_profile = _build_scoring_profile(candidate)
+        scoring = compute_match_score(base_profile, candidate_profile, context)
+        weights_used = scoring["weights"]
+        scored.append((candidate, scoring))
+
+    if weights_used is None:
+        weights_used = compute_match_score(base_profile, base_profile, context)["weights"]
+
+    return scored, weights_used
+
+
 @app.route("/health")
 def health():
     """Health check endpoint.
-    
+
     Returns:
         Response: JSON response with service status.
     """
@@ -55,47 +277,63 @@ def health():
 
 @app.route("/matches/<int:user_id>")
 def get_matches(user_id):
-    """Retrieve matches for a specific user.
-    
-    Args:
-        user_id (int): The ID of the user to get matches for.
-        
-    Returns:
-        Response: JSON response with user matches and compatibility scores.
-    """
-    matches = fetch_matches_for_user(user_id)
-    sanitized = []
-    for match in matches:
-        sanitized.append(
-            {
-                "id": match["id"],
-                "user_id": match["user_id"],
-                "name": match["name"],
-                "title": match["title"],
-                "company": match["company"],
-                "match_score": match["match_score"],
-                "common_interests": match["common_interests"],
-                "created_at": match["created_at"],
-            }
+    """Retrieve matches for a specific user using the scoring engine."""
+
+    user = get_user(user_id)
+    if user is None:
+        return (
+            jsonify({"error": "Not found", "details": "Utilisateur introuvable."}),
+            404,
         )
 
-    return jsonify({"matches": sanitized, "user_id": user_id})
+    try:
+        page = _parse_positive_int(request.args.get("page"), "page", 1)
+        page_size = _parse_positive_int(
+            request.args.get("page_size"), "page_size", 10
+        )
+        weight_overrides = _parse_weight_overrides(request.args)
+    except ValueError as exc:
+        return jsonify({"error": "Invalid request", "details": str(exc)}), 400
+
+    context = {"weights": weight_overrides} if weight_overrides else None
+    scored_candidates, weights_used = _score_candidates_for_user(user, context)
+    scored_candidates.sort(key=lambda item: item[1]["total"], reverse=True)
+
+    total = len(scored_candidates)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = scored_candidates[start:end]
+
+    results = [
+        {
+            "user_id": candidate.id,
+            "name": candidate.full_name,
+            "title": candidate.title,
+            "company": candidate.company,
+            "score": item_score["total"],
+            "breakdown": _format_breakdown(item_score),
+        }
+        for candidate, item_score in paginated
+    ]
+
+    response_body = {
+        "user_id": user_id,
+        "results": results,
+        "weights": _round_weights(weights_used),
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "pages": math.ceil(total / page_size) if page_size else 0,
+        },
+    }
+    return jsonify(response_body)
 
 
 @app.route("/swipe", methods=["POST"])
 def swipe():
-    """Record a swipe action (like/pass) and detect matches.
-    
-    Expected JSON payload:
-        {
-            "user_id": int,
-            "target_id": int,
-            "action": str  # 'like' or 'pass'
-        }
-        
-    Returns:
-        Response: JSON response with swipe result and match status.
-    """
+    """Record a swipe action (like/pass) and detect matches."""
+
     if not request.is_json:
         return (
             jsonify(
@@ -192,7 +430,7 @@ def swipe():
 
     is_match = False
     score_value = None
-    common_interests: list[str] = []
+    common_interests: List[str] = []
 
     if action == "like" and has_mutual_like(user_id, target_id):
         is_match = True
@@ -236,35 +474,46 @@ def swipe():
 
 @app.route("/algorithm/suggest/<int:user_id>")
 def suggest_profiles(user_id):
-    """Generate personalized profile suggestions using matching algorithm.
-    
-    Args:
-        user_id (int): The ID of the user to generate suggestions for.
-        
-    Returns:
-        Response: JSON response with suggested profiles and compatibility reasons.
-    """
-    suggestions = [
+    """Generate personalized profile suggestions using the scoring engine."""
+
+    user = get_user(user_id)
+    if user is None:
+        return (
+            jsonify({"error": "Not found", "details": "Utilisateur introuvable."}),
+            404,
+        )
+
+    try:
+        limit = _parse_positive_int(request.args.get("limit"), "limit", 5)
+        weight_overrides = _parse_weight_overrides(request.args)
+    except ValueError as exc:
+        return jsonify({"error": "Invalid request", "details": str(exc)}), 400
+
+    context = {"weights": weight_overrides} if weight_overrides else None
+    scored_candidates, weights_used = _score_candidates_for_user(user, context)
+    scored_candidates.sort(key=lambda item: item[1]["total"], reverse=True)
+
+    suggestions = []
+    for candidate, item_score in scored_candidates[:limit]:
+        suggestions.append(
+            {
+                "user_id": candidate.id,
+                "name": candidate.full_name,
+                "title": candidate.title,
+                "company": candidate.company,
+                "score": item_score["total"],
+                "breakdown": _format_breakdown(item_score),
+                "reasons": _format_weighted_reasons(item_score),
+            }
+        )
+
+    return jsonify(
         {
-            "user_id": 201,
-            "name": "Marie Leroy",
-            "title": "Entrepreneur",
-            "score": 92,
-            "reasons": [
-                "Same industry",
-                "Similar experience",
-                "Mutual connections",
-            ],
-        },
-        {
-            "user_id": 202,
-            "name": "Pierre Moreau",
-            "title": "Investor",
-            "score": 87,
-            "reasons": ["Complementary skills", "Geographic proximity"],
-        },
-    ]
-    return jsonify({"suggestions": suggestions, "for_user": user_id})
+            "for_user": user_id,
+            "weights": _round_weights(weights_used),
+            "suggestions": suggestions,
+        }
+    )
 
 
 if __name__ == "__main__":
