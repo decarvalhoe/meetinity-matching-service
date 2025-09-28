@@ -1,18 +1,34 @@
 """Machine learning helpers for preference scoring."""
 
-from __future__ import annotations
-
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Mapping, Sequence
 
-from joblib import load
-
 from src.analytics.collector import build_feature_vector
 from src.config import get_settings
 from src.storage.models import User
+
+
+@dataclass(frozen=True)
+class _SimpleLogisticModel:
+    """Minimal logistic regression predictor loaded from JSON artifacts."""
+
+    weights: Sequence[float]
+    bias: float
+
+    def predict_proba(self, matrix: Sequence[Sequence[float]]) -> list[list[float]]:
+        probabilities: list[list[float]] = []
+        for row in matrix:
+            z = self.bias
+            for weight, value in zip(self.weights, row):
+                z += weight * value
+            z = max(-700.0, min(700.0, z))
+            proba = 1.0 / (1.0 + math.exp(-z))
+            probabilities.append([1.0 - proba, proba])
+        return probabilities
 
 
 @dataclass(frozen=True)
@@ -44,27 +60,63 @@ def _load_latest_metadata() -> Dict[str, Any] | None:
         return None
 
 
+def _load_joblib_artifact(path: Path) -> dict[str, Any] | None:
+    try:
+        from joblib import load as joblib_load  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    try:
+        loaded = joblib_load(path)
+    except Exception:
+        return None
+    if isinstance(loaded, dict):
+        return loaded
+    return {"model": loaded}
+
+
 def _load_model_from_metadata(metadata: Mapping[str, Any]) -> LoadedModel | None:
     model_path = metadata.get("model_path")
     if not model_path:
         return None
     models_dir = _resolve_models_dir()
-    artifact_path = models_dir / model_path
+    artifact_path = models_dir / str(model_path)
     if not artifact_path.exists():
         return None
     cache_key = str(artifact_path.resolve())
     with _CACHE_LOCK:
         if cache_key in _MODEL_CACHE:
             return _MODEL_CACHE[cache_key]
-        artifact = load(artifact_path)
-        feature_names = artifact.get("feature_names") if isinstance(artifact, dict) else None
-        model = artifact.get("model") if isinstance(artifact, dict) else artifact
-        if feature_names is None:
-            # Assume alphabetical order of feature keys stored separately
-            feature_names = metadata.get("feature_names") or []
-        loaded = LoadedModel(feature_names=feature_names, model=model)
+
+    artifact_data: Mapping[str, Any] | None = None
+    if artifact_path.suffix == ".json":
+        try:
+            artifact_data = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            artifact_data = None
+    if artifact_data is None:
+        artifact_dict = _load_joblib_artifact(artifact_path)
+        if artifact_dict is not None:
+            artifact_data = artifact_dict
+
+    if artifact_data is None:
+        return None
+
+    feature_names: Sequence[str] = artifact_data.get("feature_names") or metadata.get(
+        "feature_names", []
+    )
+
+    if "weights" in artifact_data and "bias" in artifact_data:
+        model: Any = _SimpleLogisticModel(
+            weights=list(artifact_data.get("weights", [])),
+            bias=float(artifact_data.get("bias", 0.0)),
+        )
+    else:
+        model = artifact_data.get("model")
+
+    loaded = LoadedModel(feature_names=feature_names, model=model)
+    with _CACHE_LOCK:
         _MODEL_CACHE[cache_key] = loaded
-        return loaded
+    return loaded
 
 
 def _default_preference_score(match_score: float | None) -> float:
